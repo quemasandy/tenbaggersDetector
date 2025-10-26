@@ -1,0 +1,2 @@
+# tenbaggersDetector
+A tenbaggers detector
