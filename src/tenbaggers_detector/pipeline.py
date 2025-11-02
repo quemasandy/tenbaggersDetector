@@ -1,7 +1,7 @@
 """High level pipeline orchestration."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Iterable, List, Sequence
 
 from .data.models import MarketData, SignalResult
@@ -12,8 +12,8 @@ from .signals.breakout import BreakoutConfig, BreakoutDetector
 
 @dataclass
 class PipelineConfig:
-    universe_filters: UniverseFilters = UniverseFilters()
-    breakout: BreakoutConfig = BreakoutConfig()
+    universe_filters: UniverseFilters = field(default_factory=UniverseFilters)
+    breakout: BreakoutConfig = field(default_factory=BreakoutConfig)
 
 
 class TenbaggerPipeline:
