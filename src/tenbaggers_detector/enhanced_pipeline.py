@@ -25,7 +25,7 @@ Usage:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, Iterable, List, Set
+from typing import Dict, Iterable, List, Optional, Set
 
 import numpy as np
 import pandas as pd
@@ -35,11 +35,13 @@ from .analysis import (
     OutlierDetector,
     RobustnessValidator,
     SignalQualityAnalyzer,
+    SignalQualityMetrics,
 )
 from .data.models import MarketData, SignalResult
 from .data.sources import MarketDataSource
 from .pipeline import PipelineConfig, TenbaggerPipeline
 from .preprocessing import UniverseFilters
+from .enhanced_states import EnhancedPipelineContext
 
 
 @dataclass
@@ -105,9 +107,15 @@ class EnhancedPipeline:
         # Store analysis results
         self.outlier_results = None
         self.excluded_tickers: Set[str] = set()
-        self.signal_quality_before = None
-        self.signal_quality_after = None
+        self.signal_quality_before: Optional[SignalQualityMetrics] = None
+        self.signal_quality_after: Optional[SignalQualityMetrics] = None
         self.robustness_report = None
+
+    def _log(self, message: str) -> None:
+        """Utility logger respecting the verbose flag."""
+
+        if self.config.verbose:
+            print(message)
 
     def run(
         self,
@@ -115,7 +123,7 @@ class EnhancedPipeline:
         start: str | None = None,
         end: str | None = None,
     ) -> List[SignalResult]:
-        """Run enhanced pipeline with validation.
+        """Run enhanced pipeline with validation orchestrated as a state machine.
 
         Args:
             tickers: List of ticker symbols
@@ -126,56 +134,23 @@ class EnhancedPipeline:
             List of validated signal results
         """
         ticker_list = list(tickers)
+        # Reset transient analysis artifacts for each execution
+        self.outlier_results = None
+        self.excluded_tickers.clear()
+        self.signal_quality_before = None
+        self.signal_quality_after = None
+        self.robustness_report = None
 
-        # Step 1: Run base pipeline to get initial signals
-        if self.config.verbose:
-            print("\n🔍 Step 1: Running base breakout detection...")
+        context = EnhancedPipelineContext(self, ticker_list, start, end)
+        context.execute()
+        return context.data.final_results
 
-        initial_results = self.pipeline.run(ticker_list, start=start, end=end)
+    def _run_base_detection(
+        self, tickers: List[str], start: str | None, end: str | None
+    ) -> List[SignalResult]:
+        """Execute the base pipeline breakout detection."""
 
-        if not initial_results:
-            if self.config.verbose:
-                print("❌ No signals detected")
-            return []
-
-        if self.config.verbose:
-            print(f"✅ Found {len(initial_results)} initial signals")
-
-        # Step 2: Outlier detection (if enabled)
-        if self.config.enable_outlier_detection:
-            if self.config.verbose:
-                print("\n🔍 Step 2: Running outlier detection...")
-
-            self._run_outlier_detection(initial_results)
-
-            if self.config.verbose and self.outlier_results:
-                print(self.outlier_detector.generate_report(self.outlier_results))
-
-        # Step 3: Filter signals (if enabled)
-        final_results = initial_results
-
-        if self.config.enable_signal_filtering:
-            if self.config.verbose:
-                print("\n🔍 Step 3: Filtering redundant signals...")
-
-            final_results = self._filter_redundant_signals(initial_results)
-
-        # Step 4: Robustness validation (if enabled)
-        if self.config.enable_robustness_validation and self.outlier_results:
-            if self.config.verbose:
-                print("\n🔍 Step 4: Validating robustness...")
-
-            self._run_robustness_validation(final_results, ticker_list)
-
-            if self.config.verbose and self.robustness_report:
-                print(
-                    self.robustness_validator.generate_report(self.robustness_report)
-                )
-
-        if self.config.verbose:
-            print(f"\n✅ Final signals: {len(final_results)}")
-
-        return final_results
+        return self.pipeline.run(tickers, start=start, end=end)
 
     def _run_outlier_detection(self, results: List[SignalResult]) -> None:
         """Run outlier detection on signal results."""
@@ -224,6 +199,55 @@ class EnhancedPipeline:
                         last_date = signal.date_signal
 
         return filtered_results
+
+    def _update_signal_quality(
+        self,
+        before_results: List[SignalResult],
+        after_results: List[SignalResult],
+    ) -> None:
+        """Calculate signal quality metrics before and after filtering."""
+
+        if not before_results:
+            self.signal_quality_before = None
+            self.signal_quality_after = None
+            return
+
+        returns_before = self._extract_signal_returns(before_results)
+        if returns_before.empty:
+            self.signal_quality_before = None
+            self.signal_quality_after = None
+            return
+
+        returns_after = self._extract_signal_returns(after_results)
+        signals_before = self._build_signal_matrix(before_results)
+        signals_after = self._build_signal_matrix(after_results)
+
+        # Ensure all frames share the same index/columns for fair comparison
+        combined_index = returns_before.index.union(returns_after.index)
+        combined_columns = returns_before.columns.union(returns_after.columns)
+
+        returns_before = returns_before.reindex(
+            index=combined_index, columns=combined_columns, fill_value=0.0
+        )
+        returns_after = returns_after.reindex(
+            index=combined_index, columns=combined_columns, fill_value=0.0
+        )
+        signals_before = signals_before.reindex(
+            index=combined_index, columns=combined_columns, fill_value=0
+        )
+        signals_after = signals_after.reindex(
+            index=combined_index, columns=combined_columns, fill_value=0
+        )
+
+        metrics_before, metrics_after = self.signal_analyzer.compare_before_after_filter(
+            signals_before,
+            signals_after,
+            returns_before,
+            returns_after,
+        )
+
+        self.signal_quality_before = metrics_before
+        self.signal_quality_after = metrics_after
 
     def _run_robustness_validation(
         self, results: List[SignalResult], all_tickers: List[str]
@@ -291,6 +315,25 @@ class EnhancedPipeline:
             returns.append(proxy_return)
 
         return pd.Series(returns)
+
+    def _build_signal_matrix(self, results: List[SignalResult]) -> pd.DataFrame:
+        """Convert signal results into a binary matrix aligned with returns."""
+
+        if not results:
+            return pd.DataFrame()
+
+        records = [
+            {
+                "date": result.date_signal,
+                "ticker": result.ticker,
+                "signal": 1,
+            }
+            for result in results
+        ]
+
+        df = pd.DataFrame(records)
+        pivot = df.pivot(index="date", columns="ticker", values="signal")
+        return pivot.fillna(0).astype(int)
 
     def get_analysis_report(self) -> str:
         """Generate comprehensive analysis report.

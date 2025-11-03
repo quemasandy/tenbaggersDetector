@@ -18,6 +18,12 @@ Sistema modular para detectar acciones con potencial de convertirse en "tenbagge
 - **Robustness Validation**: Validación estadística para prevenir overfitting
 - **Comprehensive Reporting**: Reportes detallados con recomendaciones accionables
 
+### 🧠 Arquitectura orientada a estados
+- **State Machine Pipeline**: `EnhancedPipeline` ahora delega cada fase (detección, outliers, filtrado, validación) a estados explícitos (`enhanced_states.py`).
+- **Encapsulación del cambio**: cada estado conoce su responsabilidad y puede evolucionar sin romper el resto del flujo.
+- **Polimorfismo sobre condicionales**: las transiciones reemplazan condicionales anidados, lo que permite añadir pasos sin modificar el núcleo.
+- **Métricas cohesionadas**: el análisis de calidad se recalcula automáticamente al transicionar entre estados.
+
 ## Instalación
 
 ```bash
